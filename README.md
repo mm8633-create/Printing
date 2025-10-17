@@ -15,12 +15,90 @@ Card Printing Table ingests New Visit and Reprint lists, normalises and validate
 
 ## Quickstart
 
+### Absolute beginner walkthrough
+
+The steps below assume you are on macOS or Windows and have never used a terminal before. Every command that appears inside a
+`code block` should be typed into a terminal exactly as shown, then press Enter. Replace `C:\Users\you\Projects` (Windows) or
+`~/Projects` (macOS/Linux) with any folder you like.
+
+1. **Install Python 3.11**
+   * Windows/macOS: download from [python.org/downloads](https://www.python.org/downloads/). During installation on Windows,
+     tick “Add Python to PATH”.
+   * Verify it works by opening *Command Prompt* (Windows) or *Terminal* (macOS) and running:
+
+     ```bash
+     python --version
+     ```
+
+     You should see something like `Python 3.11.8`.
+
+2. **Download the project**
+   * Click the green “Code” button on GitHub → “Download ZIP”.
+   * Extract the ZIP to your projects folder.
+   * Open the extracted folder in your terminal:
+
+     ```bash
+     cd C:\Users\you\Projects\Printing  # Windows
+     # or
+     cd ~/Projects/Printing                # macOS/Linux
+     ```
+
+3. **Create a virtual environment** (isolated Python install):
+
+   ```bash
+   python -m venv .venv
+   ```
+
+4. **Activate the virtual environment**
+   * Windows (Command Prompt):
+
+     ```bash
+     .venv\Scripts\activate
+     ```
+
+   * macOS/Linux:
+
+     ```bash
+     source .venv/bin/activate
+     ```
+
+   When activated, your prompt shows `(.venv)` at the start.
+
+5. **Install the project and tools**
+
+   ```bash
+   pip install -e .[dev]
+   ```
+
+6. **Copy the default settings**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   On Windows without Git Bash, use `copy .env.example .env` instead. The `.env` file tells the app where to put its database
+   and export files. You can keep the defaults.
+
+7. **Initialise the database** (creates a SQLite file in the project):
+
+   ```bash
+   cards init
+   ```
+
+8. **Generate the Excel sample once** (optional but useful for testing):
+
+   ```bash
+   python scripts/generate_sample_reprints_xlsx.py
+   ```
+
+At this point the application is ready to run.
+
 ### Prerequisites
 
 * Python 3.11+
 * Node is **not** required. Optional: Docker.
 
-### Installation
+### Installation (condensed)
 
 ```bash
 python -m venv .venv
@@ -41,19 +119,27 @@ This creates the SQLite database (or the DB specified by `CARDS_DB_URL`).
 
 ### Streamlit UI
 
+Keep your virtual environment activated (`(.venv)` visible) and run:
+
 ```bash
 streamlit run cards/streamlit_app.py
 ```
 
-Follow the on-screen stepper:
+What happens next:
 
-1. Upload the New Visits list. The app will confirm with: `List 1 (New Visits) received. Ready for List 2 (Reprints)?`
-2. Upload the Reprints list. The app prompts: `List 2 (Reprints) received. Would you like me to process and merge both lists now?`
-3. Run the merge, review issues and duplicate reports, and then export. The final prompt asks: `Would you like me to export this as a CSV or make any modifications?`
+1. A browser tab opens automatically. If it does not, copy the URL that appears in the terminal (usually `http://localhost:8501`) and paste it into your browser.
+2. Click **Upload New Visits** and select `samples/new_visits.csv` (or your own file). When the upload finishes the app says: `List 1 (New Visits) received. Ready for List 2 (Reprints)?`
+3. Click **Upload Reprints** and choose `samples/reprints.xlsx`. After it loads, you are asked: `List 2 (Reprints) received. Would you like me to process and merge both lists now?`
+4. Press **Process & Merge**. The review screen shows:
+   * a validation banner explaining how many rows were normalised and how many need attention,
+   * a table with any issues flagged in red,
+   * a duplicate panel listing matches with their rule and score.
+5. Make inline edits if necessary (click a cell to edit). Use the **Re-run validation** button to re-check your fixes.
+6. When you are satisfied, click **Export files**. The app produces two downloads—Combined Master CSV and Stamps.com CSV—and then asks: `Would you like me to export this as a CSV or make any modifications?`
 
 ### CLI Usage
 
-The CLI supports the staged workflow:
+You can perform the entire workflow from the terminal. Run each command separately, pressing Enter between them:
 
 ```bash
 python scripts/generate_sample_reprints_xlsx.py  # one-time helper to materialise the Excel sample
@@ -64,7 +150,14 @@ cards export --batch 1 --out-dir ./exports
 cards history --clinic "HappyMD" --since 2025-01-01
 ```
 
-`cards merge` prints the batch summary, duplicate report, and resulting batch ID. Use `cards export` to generate the Combined Master and Stamps.com CSVs into the requested directory.
+What these commands do:
+
+1. `cards import` stores each list in the database and reports validation warnings immediately.
+2. `cards merge` combines the two lists into a batch, shows duplicate matches, and prints the batch ID (note this number).
+3. `cards export` generates the Combined Master and Stamps.com CSV files in the folder you choose (create `exports` first if it does not exist).
+4. `cards history` lets you review past batches and filter by clinic or date.
+
+Tip: the CLI prints the exact file paths for the exports so you can open them in Excel or upload to Stamps.com.
 
 ### FastAPI Backend
 
