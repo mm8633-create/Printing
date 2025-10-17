@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.env
+exports/
+.card_printing.db
+*.sqlite3
+*.db
+/samples/reprints.xlsx
+/.pytest_cache/
+/.mypy_cache/
+/build/
+/dist/
+*.egg-info/
+.card_printing.db
+node_modules/
+.DS_Store
