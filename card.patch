@@ -1,0 +1,2637 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdbbc4db77ffbc5471e4058f2eb84b0800257db1
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,3 @@
++CARDS_DB_URL=sqlite:///./card_printing.db
++CARDS_TIMEZONE=America/Los_Angeles
++CARDS_EXPORT_DIR=./exports
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..41b7f60d20ae397ffc1dcc3612878b09b2e9ba9b
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,40 @@
++name: CI
++
++on:
++  push:
++    branches: [ main, master ]
++  pull_request:
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v3
++      - name: Set up Python
++        uses: actions/setup-python@v4
++        with:
++          python-version: '3.11'
++      - name: Install dependencies
++        run: |
++          python -m pip install --upgrade pip
++          pip install -e .[dev]
++      - name: Lint
++        run: ruff check .
++      - name: Type check
++        run: mypy cards
++      - name: Tests
++        run: pytest
++      - name: Build Streamlit artifact
++        run: |
++          mkdir -p build
++          streamlit run cards/streamlit_app.py --server.headless true --server.port 8501 &
++          STREAMLIT_PID=$!
++          sleep 10
++          kill $STREAMLIT_PID || true
++          echo "Streamlit build completed" > build/README.txt
++        shell: bash
++      - name: Upload artifact
++        uses: actions/upload-artifact@v3
++        with:
++          name: streamlit-build
++          path: build
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d25fa17ed2ff5fd3c6bb13c4d65fadd1080e85c
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,16 @@
++__pycache__/
++*.pyc
++.env
++exports/
++.card_printing.db
++*.sqlite3
++*.db
++/samples/reprints.xlsx
++/.pytest_cache/
++/.mypy_cache/
++/build/
++/dist/
++*.egg-info/
++.card_printing.db
++node_modules/
++.DS_Store
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4e1b4b1c57cde884d6f51a9029db2c5fbd77075
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,18 @@
++FROM python:3.11-slim
++
++WORKDIR /app
++
++ENV PYTHONDONTWRITEBYTECODE=1
++ENV PYTHONUNBUFFERED=1
++
++COPY pyproject.toml README.md ./
++COPY cards ./cards
++COPY samples ./samples
++COPY cards/data ./cards/data
++COPY .env.example ./
++
++RUN pip install --upgrade pip && pip install .
++
++EXPOSE 8000
++
++CMD ["uvicorn", "cards.api:app", "--host", "0.0.0.0", "--port", "8000"]
+diff --git a/README.md b/README.md
+index 15b48a60b013f43714a7f1807d3db84b39d981e2..aa65778b96ba9781604c4cf4c817b625030ef5ae 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,246 @@
+-# Printing
+-Helps format csv for printing and upload to stamps.com
++# Card Printing Table
++
++Card Printing Table ingests New Visit and Reprint lists, normalises and validates patient addresses, merges the data into a combined printing list, flags uncertainties, detects duplicates against historical batches, and produces export files that are ready for Stamps.com.
++
++## Features
++
++* Two-phase ingest flow for New Visits and Reprints via Streamlit UI and Typer CLI.
++* Header mapping wizard with auto-detection heuristics for messy source files.
++* Address normalisation (street abbreviations, state conversion, ZIP parsing) and USPS ZIP-based city/state inference using a bundled lookup table.
++* Robust Heally link resolution from raw numeric IDs.
++* Duplicate detection via exact keys, Heally ID matching, and fuzzy scoring (RapidFuzz) across current uploads and history.
++* Persistent SQLite database (PostgreSQL-ready) storing batches, entries, duplicates, and export jobs.
++* Combined Master and Stamps.com-ready CSV exports sorted by first name, plus batch summaries and clinic totals.
++* FastAPI backend, Streamlit UI, and Typer CLI for headless automation.
++
++## Quickstart
++
++### Absolute beginner walkthrough
++
++The steps below assume you are on macOS or Windows and have never used a terminal before. Every command that appears inside a
++`code block` should be typed into a terminal exactly as shown, then press Enter. Replace `C:\Users\you\Projects` (Windows) or
++`~/Projects` (macOS/Linux) with any folder you like.
++
++1. **Install Python 3.11**
++   * Windows/macOS: download from [python.org/downloads](https://www.python.org/downloads/). During installation on Windows,
++     tick “Add Python to PATH”.
++   * Verify it works by opening *Command Prompt* (Windows) or *Terminal* (macOS) and running:
++
++     ```bash
++     python --version
++     ```
++
++     You should see something like `Python 3.11.8`.
++
++2. **Download the project**
++   * Click the green “Code” button on GitHub → “Download ZIP”.
++   * Extract the ZIP to your projects folder.
++   * Open the extracted folder in your terminal:
++
++     ```bash
++     cd C:\Users\you\Projects\Printing  # Windows
++     # or
++     cd ~/Projects/Printing                # macOS/Linux
++     ```
++
++3. **Create a virtual environment** (isolated Python install):
++
++   ```bash
++   python -m venv .venv
++   ```
++
++4. **Activate the virtual environment**
++   * Windows (Command Prompt):
++
++     ```bash
++     .venv\Scripts\activate
++     ```
++
++   * macOS/Linux:
++
++     ```bash
++     source .venv/bin/activate
++     ```
++
++   When activated, your prompt shows `(.venv)` at the start.
++
++5. **Install the project and tools**
++
++   ```bash
++   pip install -e .[dev]
++   ```
++
++6. **Copy the default settings**
++
++   ```bash
++   cp .env.example .env
++   ```
++
++   On Windows without Git Bash, use `copy .env.example .env` instead. The `.env` file tells the app where to put its database
++   and export files. You can keep the defaults.
++
++7. **Initialise the database** (creates a SQLite file in the project):
++
++   ```bash
++   cards init
++   ```
++
++8. **Generate the Excel sample once** (optional but useful for testing):
++
++   ```bash
++   python scripts/generate_sample_reprints_xlsx.py
++   ```
++
++At this point the application is ready to run.
++
++### Prerequisites
++
++* Python 3.11+
++* Node is **not** required. Optional: Docker.
++
++### Installation (condensed)
++
++```bash
++python -m venv .venv
++source .venv/bin/activate
++pip install -e .[dev]
++cp .env.example .env
++```
++
++Edit `.env` if you want to switch to PostgreSQL (`CARDS_DB_URL`) or tweak the timezone/export directory.
++
++### Database Setup
++
++```bash
++cards init
++```
++
++This creates the SQLite database (or the DB specified by `CARDS_DB_URL`).
++
++### Streamlit UI
++
++Keep your virtual environment activated (`(.venv)` visible) and run:
++
++```bash
++streamlit run cards/streamlit_app.py
++```
++
++What happens next:
++
++1. A browser tab opens automatically. If it does not, copy the URL that appears in the terminal (usually `http://localhost:8501`) and paste it into your browser.
++2. Click **Upload New Visits** and select `samples/new_visits.csv` (or your own file). When the upload finishes the app says: `List 1 (New Visits) received. Ready for List 2 (Reprints)?`
++3. Click **Upload Reprints** and choose `samples/reprints.xlsx`. After it loads, you are asked: `List 2 (Reprints) received. Would you like me to process and merge both lists now?`
++4. Press **Process & Merge**. The review screen shows:
++   * a validation banner explaining how many rows were normalised and how many need attention,
++   * a table with any issues flagged in red,
++   * a duplicate panel listing matches with their rule and score.
++5. Make inline edits if necessary (click a cell to edit). Use the **Re-run validation** button to re-check your fixes.
++6. When you are satisfied, click **Export files**. The app produces two downloads—Combined Master CSV and Stamps.com CSV—and then asks: `Would you like me to export this as a CSV or make any modifications?`
++
++### CLI Usage
++
++You can perform the entire workflow from the terminal. Run each command separately, pressing Enter between them:
++
++```bash
++python scripts/generate_sample_reprints_xlsx.py  # one-time helper to materialise the Excel sample
++cards import --list new-visits samples/new_visits.csv
++cards import --list reprints samples/reprints.xlsx
++cards merge --batch-label "2025-02 Wave A"
++cards export --batch 1 --out-dir ./exports
++cards history --clinic "HappyMD" --since 2025-01-01
++```
++
++What these commands do:
++
++1. `cards import` stores each list in the database and reports validation warnings immediately.
++2. `cards merge` combines the two lists into a batch, shows duplicate matches, and prints the batch ID (note this number).
++3. `cards export` generates the Combined Master and Stamps.com CSV files in the folder you choose (create `exports` first if it does not exist).
++4. `cards history` lets you review past batches and filter by clinic or date.
++
++Tip: the CLI prints the exact file paths for the exports so you can open them in Excel or upload to Stamps.com.
++
++### FastAPI Backend
++
++Run with Uvicorn:
++
++```bash
++uvicorn cards.api:app --reload
++```
++
++`POST /process` accepts New Visit & Reprint payloads plus explicit header mappings and returns the merge summary. `GET /health` returns application status.
++
++## Adding New Header Mappings
++
++Mappings are controlled by `cards/header_mapping.py`. To add aliases, edit `CANONICAL_HEADERS` or provide presets in the Streamlit header wizard. Tests cover the mapping heuristics; run `pytest` after making changes.
++
++## Address Validation & Rules
++
++* Street abbreviations expanded via `cards/address.ABBREVIATIONS`.
++* States converted to USPS 2-letter codes; full names are accepted.
++* ZIP codes parsed and validated; ZIP+4 stored split into `zip5` and `zip4`.
++* City/State inferred from ZIP using `cards/data/zipcodes.csv`; ambiguous or missing data is flagged in `uncertainty_reasons`.
++* Dates normalised to `America/Los_Angeles` and emitted as `YYYY-MM-DD HH:MM:SS`.
++* Uncertainties (missing city/zip, inferred state, constructed Heally link, etc.) are surfaced in the review UI and stored per entry.
++
++## Duplicate Detection
++
++Duplicates are flagged using three strategies:
++
++1. Exact match on normalised name + address + city + state + ZIP.
++2. Shared Heally ID.
++3. Fuzzy matching (token sort ratio) on name and address with a default threshold of 0.92.
++
++Duplicate matches are persisted in the `duplicate_matches` table with rule and score metadata. Batch-level duplicates update the `List Source` to `Both Lists`.
++
++## Changing Rules & Thresholds
++
++* Fuzzy threshold: set `CARDS_FUZZY_THRESHOLD` or change `Settings.fuzzy_threshold` in `cards/config.py`.
++* Address abbreviation map: edit `ABBREVIATIONS` in `cards/address.py`.
++* Zip lookup: update `cards/data/zipcodes.csv` (ship your own dataset).
++* Timezone: `CARDS_TIMEZONE` environment variable.
++
++## Plugging in USPS / Smarty / Lob APIs
++
++`cards/address.py` encapsulates address validation in `validate_and_normalize_address`. Swap in an API client by extending or replacing this function with a service-backed implementation. Keep uncertainty reasons explicit when external responses are ambiguous.
++
++## History & Exports
++
++Batches, entries, duplicates, and print jobs are recorded via SQLAlchemy models (`cards/models.py`). Use `cards history` or build UI/queries against the SQLite DB. Exports are stored under `exports/` by default (ignored by Git).
++
++## Samples
++
++`samples/` contains:
++
++* `new_visits.csv` – messy headers, mixed casing, sample New Visit rows.
++* `reprints.xlsx` – Excel format with alternate headers (generate it with `python scripts/generate_sample_reprints_xlsx.py`).
++
++Use them to test the mapping wizard and duplicate detection. The generation script keeps the repository binary-free while still
++providing a realistic Excel input for local runs.
++
++## Testing & CI
++
++Run tests and linters locally:
++
++```bash
++ruff check .
++mypy cards
++pytest
++```
++
++GitHub Actions (`.github/workflows/ci.yml`) runs Ruff, Mypy, Pytest, and builds the Streamlit app artifact on every push.
++
++## Docker
++
++Build the application services with Docker:
++
++```bash
++docker compose up --build
++```
++
++The compose stack launches the FastAPI backend, Streamlit frontend, and SQLite volume for persistence.
++
++## Security & Privacy
++
++* No real data is committed.
++* Exports and local databases are `.gitignore`'d.
++* Provide secrets and DB credentials via environment variables (`.env` file for local development).
+diff --git a/cards/__init__.py b/cards/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a93dfbdc15c87a73344e77cb7b5a14fe32dd4f27
+--- /dev/null
++++ b/cards/__init__.py
+@@ -0,0 +1,9 @@
++from .config import get_settings
++from .db import init_db as _init_db
++
++
++def init_db() -> None:
++    _init_db()
++
++
++__all__ = ["init_db", "get_settings"]
+diff --git a/cards/address.py b/cards/address.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6148a60ce3080d50e2b85e403656ebb0562268e
+--- /dev/null
++++ b/cards/address.py
+@@ -0,0 +1,217 @@
++from __future__ import annotations
++
++import csv
++import re
++from dataclasses import dataclass
++from functools import lru_cache
++from pathlib import Path
++from typing import Dict, Iterable, Optional, Tuple
++
++# rapid fuzzy import removed; using built-in tools only
++
++ABBREVIATIONS = {
++    "st": "Street",
++    "ave": "Avenue",
++    "blvd": "Boulevard",
++    "dr": "Drive",
++    "ln": "Lane",
++    "pl": "Place",
++    "rd": "Road",
++    "hwy": "Highway",
++    "pkwy": "Parkway",
++    "ct": "Court",
++    "cir": "Circle",
++    "trl": "Trail",
++    "way": "Way",
++}
++
++STATE_ABBREVS = {
++    "alabama": "AL",
++    "alaska": "AK",
++    "arizona": "AZ",
++    "arkansas": "AR",
++    "california": "CA",
++    "colorado": "CO",
++    "connecticut": "CT",
++    "delaware": "DE",
++    "florida": "FL",
++    "georgia": "GA",
++    "hawaii": "HI",
++    "idaho": "ID",
++    "illinois": "IL",
++    "indiana": "IN",
++    "iowa": "IA",
++    "kansas": "KS",
++    "kentucky": "KY",
++    "louisiana": "LA",
++    "maine": "ME",
++    "maryland": "MD",
++    "massachusetts": "MA",
++    "michigan": "MI",
++    "minnesota": "MN",
++    "mississippi": "MS",
++    "missouri": "MO",
++    "montana": "MT",
++    "nebraska": "NE",
++    "nevada": "NV",
++    "new hampshire": "NH",
++    "new jersey": "NJ",
++    "new mexico": "NM",
++    "new york": "NY",
++    "north carolina": "NC",
++    "north dakota": "ND",
++    "ohio": "OH",
++    "oklahoma": "OK",
++    "oregon": "OR",
++    "pennsylvania": "PA",
++    "rhode island": "RI",
++    "south carolina": "SC",
++    "south dakota": "SD",
++    "tennessee": "TN",
++    "texas": "TX",
++    "utah": "UT",
++    "vermont": "VT",
++    "virginia": "VA",
++    "washington": "WA",
++    "west virginia": "WV",
++    "wisconsin": "WI",
++    "wyoming": "WY",
++}
++
++USPS_STATES = set(STATE_ABBREVS.values())
++
++ZIP_RE = re.compile(r"^(?P<zip5>\d{5})(?:[- ]?(?P<zip4>\d{4}))?$")
++
++
++@dataclass
++class AddressValidationResult:
++    address: str
++    city: str
++    state: str
++    zip5: str
++    zip4: Optional[str]
++    inferred: bool = False
++    reasons: Tuple[str, ...] = ()
++
++
++@lru_cache(maxsize=1)
++def load_zip_db() -> Dict[str, Tuple[str, str]]:
++    dataset_path = Path(__file__).parent / "data" / "zipcodes.csv"
++    mapping: Dict[str, Tuple[str, str]] = {}
++    with dataset_path.open("r", encoding="utf-8") as fp:
++        reader = csv.DictReader(fp)
++        for row in reader:
++            mapping[row["zip"].strip()] = (row["city"].strip(), row["state"].strip())
++    return mapping
++
++
++def normalize_address(address: str) -> str:
++    parts = []
++    tokens = re.split(r"\s+", address.strip())
++    for token in tokens:
++        lower = token.lower().strip(",.")
++        if lower in ABBREVIATIONS:
++            parts.append(ABBREVIATIONS[lower])
++        else:
++            parts.append(token.title())
++    return " ".join(parts)
++
++
++def normalize_state(state: str) -> Tuple[str, Tuple[str, ...]]:
++    state = state.strip()
++    reasons = []
++    if len(state) == 2 and state.upper() in USPS_STATES:
++        return state.upper(), tuple(reasons)
++    normalized = state.lower()
++    if normalized in STATE_ABBREVS:
++        reasons.append("state_name_converted")
++        return STATE_ABBREVS[normalized], tuple(reasons)
++    return state.upper(), tuple(["invalid_state"])
++
++
++def normalize_zip(zip_code: str) -> Tuple[Optional[str], Optional[str], Tuple[str, ...]]:
++    if not zip_code:
++        return None, None, ("missing_zip",)
++    match = ZIP_RE.match(zip_code.strip())
++    if not match:
++        return None, None, ("invalid_zip",)
++    zip5 = match.group("zip5")
++    zip4 = match.group("zip4")
++    return zip5, zip4, tuple()
++
++
++def infer_city_state_from_zip(zip5: str) -> Optional[Tuple[str, str]]:
++    zip_db = load_zip_db()
++    return zip_db.get(zip5)
++
++
++def normalize_city(city: str) -> str:
++    return city.strip().title()
++
++
++def validate_and_normalize_address(
++    address: str,
++    city: Optional[str],
++    state: Optional[str],
++    zip_code: Optional[str],
++) -> AddressValidationResult:
++    reasons = []
++    normalized_address = normalize_address(address)
++    zip5, zip4, zip_reasons = normalize_zip(zip_code or "")
++    reasons.extend(zip_reasons)
++
++    normalized_city = normalize_city(city or "") if city else ""
++    normalized_state = (state or "").strip()
++
++    if normalized_state:
++        normalized_state, state_reasons = normalize_state(normalized_state)
++        reasons.extend(state_reasons)
++    else:
++        normalized_state = ""
++        reasons.append("missing_state")
++
++    if not normalized_city and zip5:
++        inferred = infer_city_state_from_zip(zip5)
++        if inferred:
++            normalized_city, inferred_state = inferred
++            if not normalized_state:
++                normalized_state = inferred_state
++            elif normalized_state != inferred_state:
++                reasons.append("zip_state_mismatch")
++            reasons.append("inferred_city_state_from_zip")
++        else:
++            reasons.append("zip_not_found")
++    elif not normalized_city:
++        reasons.append("missing_city")
++    else:
++        normalized_city = normalize_city(normalized_city)
++
++    if not normalized_state and zip5:
++        inferred = infer_city_state_from_zip(zip5)
++        if inferred:
++            _, inferred_state = inferred
++            normalized_state = inferred_state
++            reasons.append("inferred_state_from_zip")
++    if not normalized_state:
++        reasons.append("missing_state")
++
++    return AddressValidationResult(
++        address=normalized_address,
++        city=normalized_city,
++        state=normalized_state,
++        zip5=zip5 or "",
++        zip4=zip4,
++        inferred="inferred_city_state_from_zip" in reasons or "inferred_state_from_zip" in reasons,
++        reasons=tuple(sorted(set(r for r in reasons if r))),
++    )
++
++
++__all__ = [
++    "AddressValidationResult",
++    "normalize_address",
++    "validate_and_normalize_address",
++    "normalize_state",
++    "normalize_zip",
++    "infer_city_state_from_zip",
++    "load_zip_db",
++]
+diff --git a/cards/api.py b/cards/api.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfa922f89a49f80a95d4ea53a28e9a5b6e0660ae
+--- /dev/null
++++ b/cards/api.py
+@@ -0,0 +1,80 @@
++from __future__ import annotations
++
++from typing import List
++
++from . import simple_pandas as pd
++
++try:  # pragma: no cover
++    from fastapi import FastAPI
++except ImportError:  # pragma: no cover
++    class FastAPI:  # type: ignore
++        def __init__(self, *args, **kwargs):
++            pass
++
++        def on_event(self, *args, **kwargs):
++            def decorator(func):
++                return func
++
++            return decorator
++
++        def post(self, *args, **kwargs):
++            def decorator(func):
++                return func
++
++            return decorator
++
++        def get(self, *args, **kwargs):
++            def decorator(func):
++                return func
++
++            return decorator
++
++
++try:  # pragma: no cover
++    from pydantic import BaseModel
++except ImportError:  # pragma: no cover
++    class BaseModel:  # type: ignore
++        def __init__(self, **data):
++            for key, value in data.items():
++                setattr(self, key, value)
++
++from . import init_db
++from .config import get_settings
++from .header_mapping import HeaderMappingResult
++from .processing import DataProcessor
++
++app = FastAPI(title="Card Printing Table API")
++
++
++class UploadPayload(BaseModel):
++    new_visits: List[dict]
++    reprints: List[dict]
++    new_visit_mapping: dict
++    reprint_mapping: dict
++    batch_label: str | None = None
++
++
++@app.on_event("startup")
++def startup_event() -> None:
++    init_db()
++
++
++@app.post("/process")
++def process(payload: UploadPayload):
++    processor = DataProcessor()
++    new_df = pd.DataFrame(payload.new_visits)
++    re_df = pd.DataFrame(payload.reprints)
++    new_mapping = HeaderMappingResult(mapping=payload.new_visit_mapping, missing=[], extras=[])
++    re_mapping = HeaderMappingResult(mapping=payload.reprint_mapping, missing=[], extras=[])
++    report = processor.process(new_df, re_df, new_mapping, re_mapping, batch_label=payload.batch_label)
++    return {
++        "summary": report.summary,
++        "issues": report.issues,
++        "duplicates": report.duplicate_reports,
++    }
++
++
++@app.get("/health")
++def health():
++    settings = get_settings()
++    return {"status": "ok", "db": settings.db_url}
+diff --git a/cards/cli.py b/cards/cli.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..41a3e65f3ea1aaf79f781a206264628a6bcc408f
+--- /dev/null
++++ b/cards/cli.py
+@@ -0,0 +1,157 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Optional
++
++from . import simple_pandas as pd
++import typer
++
++from . import init_db
++from .config import get_settings
++from .db import session_scope
++from .processing import DataProcessor
++
++app = typer.Typer(help="Card Printing Table CLI")
++
++
++@app.command()
++def init(db_url: Optional[str] = typer.Option(None, help="Override database URL")) -> None:
++    """Initialise the database."""
++    if db_url:
++        settings = get_settings()
++        settings.db_url = db_url
++    init_db()
++    typer.echo("Database initialised.")
++
++
++@app.command()
++def import_list(
++    list_type: str = typer.Option(..., "--list", help="List type: new-visits or reprints"),
++    path: Path = typer.Argument(..., exists=True),
++    batch_label: Optional[str] = typer.Option(None, help="Optional batch label"),
++) -> None:
++    """Import two lists sequentially and merge them."""
++    if list_type not in {"new-visits", "reprints"}:
++        raise typer.BadParameter("list must be 'new-visits' or 'reprints'")
++
++    settings = get_settings()
++    init_db()
++    processor = DataProcessor()
++
++    df = processor.read_input(path)
++    mapping = processor.map_headers(df, "new_visit" if list_type == "new-visits" else "reprint")
++
++    temp_path = settings.export_dir / f"pending_{list_type}.parquet"
++    df.to_parquet(temp_path, index=False)
++    mapping_path = settings.export_dir / f"pending_{list_type}_mapping.json"
++    mapping_path.write_text(json.dumps(mapping.mapping), encoding="utf-8")
++
++    typer.echo(f"Stored {list_type} data for later merge at {temp_path}")
++
++
++@app.command()
++def merge(
++    batch_label: Optional[str] = typer.Option(None, help="Optional label for batch"),
++) -> None:
++    """Merge previously imported new visits and reprints."""
++    settings = get_settings()
++    init_db()
++    processor = DataProcessor()
++
++    new_path = settings.export_dir / "pending_new-visits.parquet"
++    reprint_path = settings.export_dir / "pending_reprints.parquet"
++
++    if not new_path.exists() or not reprint_path.exists():
++        raise typer.BadParameter("Both new visits and reprints must be imported before merge.")
++
++    new_df = pd.read_parquet(new_path)
++    re_df = pd.read_parquet(reprint_path)
++
++    new_mapping_data = json.loads((settings.export_dir / "pending_new-visits_mapping.json").read_text("utf-8"))
++    re_mapping_data = json.loads((settings.export_dir / "pending_reprints_mapping.json").read_text("utf-8"))
++
++    from .header_mapping import HeaderMappingResult
++
++    new_mapping = HeaderMappingResult(mapping=new_mapping_data, missing=[], extras=[])
++    re_mapping = HeaderMappingResult(mapping=re_mapping_data, missing=[], extras=[])
++
++    report = processor.process(new_df, re_df, new_mapping, re_mapping, batch_label=batch_label)
++
++    typer.echo(json.dumps(report.summary, indent=2))
++    typer.echo("Duplicate reports:")
++    typer.echo(json.dumps(report.duplicate_reports, indent=2))
++    typer.echo(f"Batch ID: {report.batch_id}")
++
++    with open(settings.export_dir / "latest_report.json", "w", encoding="utf-8") as fp:
++        json.dump({
++            "summary": report.summary,
++            "issues": report.issues,
++            "duplicates": report.duplicate_reports,
++        }, fp, indent=2)
++
++    typer.echo("Merge complete. Use `cards export` to create CSV outputs.")
++
++
++@app.command()
++def export(
++    batch_id: int = typer.Option(..., "--batch", help="Batch ID to export"),
++    out_dir: Optional[Path] = typer.Option(None, help="Override export directory"),
++) -> None:
++    """Export CSV files for a batch."""
++    init_db()
++    settings = get_settings()
++    if out_dir:
++        settings.export_dir = out_dir
++        settings.export_dir.mkdir(parents=True, exist_ok=True)
++    processor = DataProcessor()
++
++    with session_scope() as conn:
++        batch = conn.execute("SELECT id FROM batches WHERE id = ?", (batch_id,)).fetchone()
++        if not batch:
++            raise typer.BadParameter(f"Batch {batch_id} not found")
++        rows = [dict(row) for row in conn.execute("SELECT * FROM entries WHERE batch_id = ?", (batch_id,)).fetchall()]
++    entries = [processor.from_entry_record(row) for row in rows]
++
++    stamps, combined = processor.export(entries, batch_id)
++    typer.echo(f"Exports written to {stamps} and {combined}")
++
++
++@app.command()
++def history(
++    clinic: Optional[str] = typer.Option(None),
++    since: Optional[str] = typer.Option(None),
++) -> None:
++    """Display history of batches."""
++    from .db import session_scope
++    from .models import Batch, Entry
++
++    init_db()
++
++    with session_scope() as conn:
++        params = []
++        query = "SELECT id, label, created_at FROM batches"
++        if since:
++            query += " WHERE created_at >= ?"
++            params.append(since)
++        query += " ORDER BY created_at DESC"
++        typer.echo("Batches:")
++        for row in conn.execute(query, params).fetchall():
++            label = row["label"] or "No label"
++            created = row["created_at"]
++            typer.echo(f"- {row['id']}: {label} ({created[:10]})")
++            if clinic:
++                entries = conn.execute(
++                    "SELECT normalized_payload_json FROM entries WHERE batch_id = ?",
++                    (row["id"],),
++                ).fetchall()
++                count = sum(
++                    1
++                    for entry_row in entries
++                    if json.loads(entry_row["normalized_payload_json"]).get("clinic_name") == clinic
++                )
++                typer.echo(f"  Entries for clinic {clinic}: {count}")
++
++
++if __name__ == "__main__":
++    app()
+diff --git a/cards/config.py b/cards/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1651e568426f7753f047b53431dab23234b37c71
+--- /dev/null
++++ b/cards/config.py
+@@ -0,0 +1,38 @@
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass, field
++from functools import lru_cache
++from pathlib import Path
++
++
++@dataclass
++class Settings:
++    db_url: str = "sqlite:///./card_printing.db"
++    timezone: str = "America/Los_Angeles"
++    export_dir: Path = field(default_factory=lambda: Path("exports"))
++    fuzzy_threshold: float = 0.92
++
++    @classmethod
++    def from_env(cls) -> "Settings":
++        db_url = os.getenv("CARDS_DB_URL", cls.db_url)
++        timezone = os.getenv("CARDS_TIMEZONE", cls.timezone)
++        default_export = Path("exports")
++        export_dir = Path(os.getenv("CARDS_EXPORT_DIR", str(default_export)))
++        fuzzy_threshold = float(os.getenv("CARDS_FUZZY_THRESHOLD", cls.fuzzy_threshold))
++        settings = cls(
++            db_url=db_url,
++            timezone=timezone,
++            export_dir=export_dir,
++            fuzzy_threshold=fuzzy_threshold,
++        )
++        settings.export_dir.mkdir(parents=True, exist_ok=True)
++        return settings
++
++
++@lru_cache(maxsize=1)
++def get_settings() -> Settings:
++    return Settings.from_env()
++
++
++__all__ = ["Settings", "get_settings"]
+diff --git a/cards/data/zipcodes.csv b/cards/data/zipcodes.csv
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6ff96cd6a4670655c188f1aacd9202af53b5fd7
+--- /dev/null
++++ b/cards/data/zipcodes.csv
+@@ -0,0 +1,110 @@
++zip,city,state
++90001,Los Angeles,CA
++90002,Los Angeles,CA
++90003,Los Angeles,CA
++94102,San Francisco,CA
++94103,San Francisco,CA
++94107,San Francisco,CA
++94108,San Francisco,CA
++94109,San Francisco,CA
++94110,San Francisco,CA
++94111,San Francisco,CA
++94112,San Francisco,CA
++94114,San Francisco,CA
++94115,San Francisco,CA
++94116,San Francisco,CA
++94117,San Francisco,CA
++94118,San Francisco,CA
++94121,San Francisco,CA
++94122,San Francisco,CA
++94123,San Francisco,CA
++94124,San Francisco,CA
++94127,San Francisco,CA
++94131,San Francisco,CA
++94132,San Francisco,CA
++94134,San Francisco,CA
++90210,Beverly Hills,CA
++90717,Lomita,CA
++95966,Oroville,CA
++90305,Inglewood,CA
++93637,Madera,CA
++10001,New York,NY
++10002,New York,NY
++10003,New York,NY
++10004,New York,NY
++10005,New York,NY
++10006,New York,NY
++10007,New York,NY
++10010,New York,NY
++10011,New York,NY
++10012,New York,NY
++10013,New York,NY
++10014,New York,NY
++10016,New York,NY
++10017,New York,NY
++10018,New York,NY
++10019,New York,NY
++10020,New York,NY
++10021,New York,NY
++10022,New York,NY
++10023,New York,NY
++10024,New York,NY
++10025,New York,NY
++10026,New York,NY
++10027,New York,NY
++10028,New York,NY
++10029,New York,NY
++10030,New York,NY
++10031,New York,NY
++10032,New York,NY
++10033,New York,NY
++10034,New York,NY
++10035,New York,NY
++10036,New York,NY
++10037,New York,NY
++10038,New York,NY
++10039,New York,NY
++10040,New York,NY
++73301,Austin,TX
++73344,Austin,TX
++60601,Chicago,IL
++60602,Chicago,IL
++60603,Chicago,IL
++60604,Chicago,IL
++60605,Chicago,IL
++60606,Chicago,IL
++73344,Austin,TX
++73301,Austin,TX
++07030,Hoboken,NJ
++30301,Atlanta,GA
++85001,Phoenix,AZ
++73344,Austin,TX
++73301,Austin,TX
++48201,Detroit,MI
++32801,Orlando,FL
++98101,Seattle,WA
++73301,Austin,TX
++73344,Austin,TX
++73301,Austin,TX
++73344,Austin,TX
++73301,Austin,TX
++73344,Austin,TX
++10045,New York,NY
++10046,New York,NY
++10047,New York,NY
++10048,New York,NY
++10055,New York,NY
++10060,New York,NY
++10069,New York,NY
++11201,Brooklyn,NY
++11215,Brooklyn,NY
++11217,Brooklyn,NY
++11238,Brooklyn,NY
++11249,Brooklyn,NY
++30303,Atlanta,GA
++33101,Miami,FL
++73301,Austin,TX
++73344,Austin,TX
++73301,Austin,TX
++73344,Austin,TX
++
+diff --git a/cards/db.py b/cards/db.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..680b0ec3980236c9067f8757911c4c2c7a9aa9f5
+--- /dev/null
++++ b/cards/db.py
+@@ -0,0 +1,100 @@
++from __future__ import annotations
++
++import sqlite3
++from contextlib import contextmanager
++from pathlib import Path
++from typing import Iterator
++
++from .config import get_settings
++
++_connection_cache: dict[str, sqlite3.Connection] = {}
++
++
++def get_database_path() -> Path:
++    settings = get_settings()
++    url = settings.db_url
++    if url.startswith("sqlite:///"):
++        path = url.replace("sqlite:///", "")
++        return Path(path)
++    raise ValueError("Only sqlite:/// URLs are supported in this lightweight build")
++
++
++def get_connection() -> sqlite3.Connection:
++    db_path = str(get_database_path())
++    if db_path not in _connection_cache:
++        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
++        conn = sqlite3.connect(db_path)
++        conn.row_factory = sqlite3.Row
++        _connection_cache[db_path] = conn
++    return _connection_cache[db_path]
++
++
++@contextmanager
++def session_scope() -> Iterator[sqlite3.Connection]:
++    conn = get_connection()
++    try:
++        yield conn
++        conn.commit()
++    except Exception:
++        conn.rollback()
++        raise
++
++
++def init_db() -> None:
++    conn = get_connection()
++    conn.execute(
++        """
++        CREATE TABLE IF NOT EXISTS batches (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            label TEXT,
++            source TEXT DEFAULT 'upload',
++            notes TEXT,
++            created_at TEXT DEFAULT CURRENT_TIMESTAMP
++        )
++        """
++    )
++    conn.execute(
++        """
++        CREATE TABLE IF NOT EXISTS entries (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            batch_id INTEGER NOT NULL,
++            list_source TEXT NOT NULL,
++            date_time_local TEXT,
++            raw_payload_json TEXT NOT NULL,
++            normalized_payload_json TEXT NOT NULL,
++            validation_status TEXT NOT NULL,
++            uncertainty_reasons TEXT NOT NULL,
++            FOREIGN KEY(batch_id) REFERENCES batches(id)
++        )
++        """
++    )
++    conn.execute(
++        """
++        CREATE TABLE IF NOT EXISTS duplicate_matches (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            entry_id INTEGER,
++            matched_entry_id INTEGER,
++            rule TEXT NOT NULL,
++            score REAL,
++            created_at TEXT DEFAULT CURRENT_TIMESTAMP
++        )
++        """
++    )
++    conn.execute(
++        """
++        CREATE TABLE IF NOT EXISTS print_jobs (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            batch_id INTEGER NOT NULL,
++            started_at TEXT,
++            finished_at TEXT,
++            entry_count INTEGER,
++            stamps_export_path TEXT,
++            combined_export_path TEXT,
++            FOREIGN KEY(batch_id) REFERENCES batches(id)
++        )
++        """
++    )
++    conn.commit()
++
++
++__all__ = ["init_db", "session_scope", "get_connection"]
+diff --git a/cards/header_mapping.py b/cards/header_mapping.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8beb98fc25714e6023a4733c79c6ea81903a2f8c
+--- /dev/null
++++ b/cards/header_mapping.py
+@@ -0,0 +1,89 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Dict, Iterable, List, Mapping, Optional, Sequence
++
++import difflib
++
++REQUIRED_FIELDS = {
++    "new_visit": [
++        "name",
++        "clinic_name",
++        "address",
++        "city",
++        "state",
++        "zip",
++        "date_time",
++        "heally_link",
++    ],
++    "reprint": [
++        "name",
++        "clinic_name",
++        "address",
++        "city",
++        "state",
++        "zip",
++        "heally_link",
++        "date_time",
++    ],
++}
++
++OPTIONAL_FIELDS = [
++    "address_2",
++    "heally_id",
++]
++
++CANONICAL_HEADERS = {
++    "name": ["name", "patient", "full_name", "patient_name", "patient_full_name"],
++    "clinic_name": ["clinic", "clinic_name", "clinicname"],
++    "address": ["address", "address1", "addr", "street", "street_address"],
++    "address_2": ["address2", "addr2", "suite"],
++    "city": ["city", "town", "city_name"],
++    "state": ["state", "province", "st"],
++    "zip": ["zip", "zipcode", "zip_code", "postal", "postal_code"],
++    "date_time": ["date", "datetime", "date_time", "appointment", "timestamp"],
++    "heally_link": ["heally", "heally_link", "profile", "patient_portal"],
++    "heally_id": ["heally_id", "patient_id", "id"],
++}
++
++
++@dataclass
++class HeaderMappingResult:
++    mapping: Dict[str, str]
++    missing: List[str]
++    extras: List[str]
++
++
++class HeaderMapper:
++    def __init__(self, headers: Sequence[str]):
++        self.headers = [h.strip() for h in headers]
++        self.normalized = [h.lower().replace(" ", "_") for h in self.headers]
++
++    def suggest_mapping(self) -> Dict[str, str]:
++        mapping: Dict[str, str] = {}
++        for canonical, variants in CANONICAL_HEADERS.items():
++            for header, normalized in zip(self.headers, self.normalized):
++                if normalized in variants:
++                    mapping[canonical] = header
++                    break
++            if canonical not in mapping:
++                closest = difflib.get_close_matches(canonical, self.normalized, n=1, cutoff=0.85)
++                if closest:
++                    idx = self.normalized.index(closest[0])
++                    mapping[canonical] = self.headers[idx]
++        return mapping
++
++    def resolve(self, required_for: str) -> HeaderMappingResult:
++        required = REQUIRED_FIELDS[required_for]
++        mapping = self.suggest_mapping()
++        missing = [field for field in required if field not in mapping]
++        extras = [h for h in self.headers if h not in mapping.values()]
++        return HeaderMappingResult(mapping=mapping, missing=missing, extras=extras)
++
++
++def map_headers(headers: Sequence[str], required_for: str) -> HeaderMappingResult:
++    mapper = HeaderMapper(headers)
++    return mapper.resolve(required_for)
++
++
++__all__ = ["map_headers", "HeaderMappingResult", "HeaderMapper", "REQUIRED_FIELDS", "OPTIONAL_FIELDS"]
+diff --git a/cards/models.py b/cards/models.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..88a82a6a3312dacd2c8b27fec5387f78a4b8a599
+--- /dev/null
++++ b/cards/models.py
+@@ -0,0 +1,47 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Optional
++
++
++@dataclass
++class Batch:
++    id: int
++    label: Optional[str]
++    source: str
++    notes: Optional[str]
++    created_at: str
++
++
++@dataclass
++class Entry:
++    id: int
++    batch_id: int
++    list_source: str
++    date_time_local: Optional[str]
++    raw_payload_json: str
++    normalized_payload_json: str
++    validation_status: str
++    uncertainty_reasons: str
++
++
++@dataclass
++class DuplicateMatch:
++    id: int
++    entry_id: Optional[int]
++    matched_entry_id: Optional[int]
++    rule: str
++    score: Optional[float]
++    created_at: str
++
++
++@dataclass
++class PrintJob:
++    id: int
++    batch_id: int
++    started_at: str
++    finished_at: Optional[str]
++    entry_count: int
++    stamps_export_path: str
++    combined_export_path: str
+diff --git a/cards/processing.py b/cards/processing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..99d03d13cd3744b15151ec84fa38f2a51058347e
+--- /dev/null
++++ b/cards/processing.py
+@@ -0,0 +1,484 @@
++from __future__ import annotations
++
++import json
++from collections import defaultdict
++from dataclasses import dataclass
++from datetime import datetime
++from pathlib import Path
++from typing import Dict, Iterable, List, Optional, Sequence, Tuple
++
++from . import simple_pandas as pd
++
++from .address import AddressValidationResult, validate_and_normalize_address
++from .config import get_settings
++from .db import session_scope, init_db
++from .header_mapping import HeaderMappingResult, map_headers
++from .utils import (
++    NormalizedEntry,
++    extract_heally,
++    format_datetime,
++    fuzzy_match_score,
++    normalize_name,
++    normalized_key,
++    parse_datetime,
++)
++
++
++@dataclass
++class ProcessingReport:
++    normalized_entries: List[NormalizedEntry]
++    header_mapping: HeaderMappingResult
++    issues: Dict[str, List[str]]
++    duplicate_reports: List[Dict]
++    summary: Dict[str, int]
++    batch_id: int
++
++
++SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".txt", ".xlsx"}
++
++
++class DataProcessor:
++    def __init__(self, timezone: Optional[str] = None):
++        self.settings = get_settings()
++        if timezone:
++            self.settings.timezone = timezone
++        init_db()
++        self.existing_entries_cache: List[Dict[str, object]] = []
++        self._load_history()
++
++    def _load_history(self):
++        with session_scope() as conn:
++            cursor = conn.execute(
++                "SELECT id, list_source, normalized_payload_json, validation_status, uncertainty_reasons FROM entries"
++            )
++            rows = cursor.fetchall()
++            for row in rows:
++                payload = json.loads(row["normalized_payload_json"])
++                reasons = json.loads(row["uncertainty_reasons"])
++                normalized = NormalizedEntry(
++                    name=payload.get("name", ""),
++                    clinic_name=payload.get("clinic_name", ""),
++                    address=payload.get("address", ""),
++                    city=payload.get("city", ""),
++                    state=payload.get("state", ""),
++                    zip_code=payload.get("zip", ""),
++                    heally_link=payload.get("heally_link", "N/A"),
++                    heally_id=payload.get("heally_id"),
++                    date_time=None,
++                    list_source=row["list_source"],
++                    raw={},
++                    normalized_payload=payload,
++                    validation_status=row["validation_status"],
++                    uncertainty_reasons=reasons,
++                )
++                self.existing_entries_cache.append({"entry": normalized, "entry_id": row["id"]})
++
++    def read_input(self, source) -> pd.DataFrame:
++        if isinstance(source, pd.DataFrame):
++            return source.copy()
++        path = Path(source)
++        ext = path.suffix.lower()
++        if ext not in SUPPORTED_EXTENSIONS:
++            raise ValueError(f"Unsupported file extension: {ext}")
++        if ext == ".xlsx":
++            df = pd.read_excel(path)
++        elif ext in {".tsv", ".txt"}:
++            df = pd.read_csv(path, sep="\t")
++        else:
++            df = pd.read_csv(path)
++        return df
++
++    def map_headers(self, df: pd.DataFrame, list_type: str) -> HeaderMappingResult:
++        result = map_headers(list(df.columns), list_type)
++        return result
++
++    def normalize_rows(
++        self,
++        df: pd.DataFrame,
++        list_type: str,
++        header_mapping: HeaderMappingResult,
++    ) -> Tuple[List[NormalizedEntry], Dict[str, List[str]]]:
++        timezone = self.settings.timezone
++        normalized_entries: List[NormalizedEntry] = []
++        issues: Dict[str, List[str]] = defaultdict(list)
++
++        mapping = header_mapping.mapping
++        missing = header_mapping.missing
++        if missing:
++            issues["missing_columns"] = missing
++
++        for idx, row in df.iterrows():
++            raw = row.to_dict()
++            name_field = mapping.get("name")
++            address_field = mapping.get("address")
++            city_field = mapping.get("city")
++            state_field = mapping.get("state")
++            zip_field = mapping.get("zip")
++            clinic_field = mapping.get("clinic_name")
++            date_field = mapping.get("date_time")
++            heally_field = mapping.get("heally_link")
++
++            name = str(raw.get(name_field, "")) if name_field else ""
++            address = str(raw.get(address_field, "")) if address_field else ""
++            city = str(raw.get(city_field, "")) if city_field else ""
++            state = str(raw.get(state_field, "")) if state_field else ""
++            zip_code = str(raw.get(zip_field, "")) if zip_field else ""
++            clinic_name = str(raw.get(clinic_field, "")) if clinic_field else ""
++            date_value = raw.get(date_field) if date_field else None
++            heally_value = raw.get(heally_field) if heally_field else None
++
++            normalized_name, name_reasons = normalize_name(name)
++            address_result: AddressValidationResult = validate_and_normalize_address(
++                address=address,
++                city=city,
++                state=state,
++                zip_code=zip_code,
++            )
++            heally_link, heally_id, heally_reasons = extract_heally(heally_value, raw)
++            date_time, date_reasons = parse_datetime(str(date_value) if date_value is not None else None, timezone)
++
++            reasons = []
++            reasons.extend(name_reasons)
++            reasons.extend(list(address_result.reasons))
++            reasons.extend(heally_reasons)
++            reasons.extend(date_reasons)
++
++            validation_status = "ok" if not reasons else "attention"
++            if not normalized_name or not address_result.address:
++                validation_status = "rejected"
++                reasons.append("missing_core_fields")
++
++            normalized = NormalizedEntry(
++                name=normalized_name,
++                clinic_name=clinic_name.title() if clinic_name else "",
++                address=address_result.address,
++                city=address_result.city,
++                state=address_result.state,
++                zip_code="-".join(filter(None, [address_result.zip5, address_result.zip4]))
++                if address_result.zip4
++                else address_result.zip5,
++                heally_link=heally_link,
++                heally_id=heally_id,
++                date_time=date_time,
++                list_source="New Visit" if list_type == "new_visit" else "Reprint",
++                raw=raw,
++                normalized_payload={
++                    "name": normalized_name,
++                    "clinic_name": clinic_name.title() if clinic_name else "",
++                    "address": address_result.address,
++                    "city": address_result.city,
++                    "state": address_result.state,
++                    "zip": address_result.zip5,
++                    "zip4": address_result.zip4,
++                    "heally_link": heally_link,
++                    "heally_id": heally_id,
++                    "date_time": format_datetime(date_time),
++                    "list_source": "New Visit" if list_type == "new_visit" else "Reprint",
++                },
++                validation_status=validation_status,
++                uncertainty_reasons=sorted(set(reasons)),
++            )
++            normalized_entries.append(normalized)
++
++        return normalized_entries, issues
++
++    def detect_duplicates(self, entries: List[NormalizedEntry]) -> List[Dict]:
++        duplicates = []
++        existing = {normalized_key(item["entry"]): item for item in self.existing_entries_cache}
++        for entry in entries:
++            key = normalized_key(entry)
++            if key in existing:
++                matched = existing[key]
++                duplicates.append(
++                    {
++                        "entry": entry,
++                        "rule": "exact_key",
++                        "score": 1.0,
++                        "matched": matched["entry"],
++                        "matched_entry_id": matched.get("entry_id"),
++                    }
++                )
++                entry.normalized_payload["duplicate"] = "Yes"
++                continue
++            if entry.heally_id:
++                for cached in self.existing_entries_cache:
++                    other = cached["entry"]
++                    if other.heally_id and other.heally_id == entry.heally_id:
++                        duplicates.append(
++                            {
++                                "entry": entry,
++                                "rule": "heally_id",
++                                "score": 1.0,
++                                "matched": other,
++                                "matched_entry_id": cached.get("entry_id"),
++                            }
++                        )
++                        entry.normalized_payload["duplicate"] = "Yes"
++                        break
++            if entry.normalized_payload.get("duplicate") == "Yes":
++                continue
++            for cached in self.existing_entries_cache:
++                other = cached["entry"]
++                score = fuzzy_match_score(entry, other)
++                if score >= self.settings.fuzzy_threshold:
++                    duplicates.append(
++                        {
++                            "entry": entry,
++                            "rule": "fuzzy",
++                            "score": score,
++                            "matched": other,
++                            "matched_entry_id": cached.get("entry_id"),
++                        }
++                    )
++                    entry.normalized_payload["duplicate"] = "Yes"
++                    break
++            if entry.normalized_payload.get("duplicate") != "Yes":
++                entry.normalized_payload["duplicate"] = "No"
++        return duplicates
++
++    def deduplicate_within_batch(self, entries: List[NormalizedEntry]) -> List[Dict]:
++        duplicates = []
++        seen_entries: List[NormalizedEntry] = []
++        for entry in entries:
++            duplicate_found = False
++            for other in seen_entries:
++                if normalized_key(entry) == normalized_key(other):
++                    duplicates.append({
++                        "entry": entry,
++                        "rule": "exact_key_batch",
++                        "score": 1.0,
++                        "matched": other,
++                        "matched_entry_id": None,
++                    })
++                    duplicate_found = True
++                elif entry.heally_id and other.heally_id and entry.heally_id == other.heally_id:
++                    duplicates.append({
++                        "entry": entry,
++                        "rule": "heally_id_batch",
++                        "score": 1.0,
++                        "matched": other,
++                        "matched_entry_id": None,
++                    })
++                    duplicate_found = True
++                else:
++                    score = fuzzy_match_score(entry, other)
++                    if score >= self.settings.fuzzy_threshold:
++                        duplicates.append({
++                            "entry": entry,
++                            "rule": "fuzzy_batch",
++                            "score": score,
++                            "matched": other,
++                            "matched_entry_id": None,
++                        })
++                        duplicate_found = True
++                if duplicate_found:
++                    entry.normalized_payload["duplicate"] = "Yes"
++                    other.normalized_payload["duplicate"] = "Yes"
++                    other.normalized_payload["list_source"] = "Both Lists"
++                    entry.normalized_payload["list_source"] = "Both Lists"
++                    other.list_source = "Both Lists"
++                    entry.list_source = "Both Lists"
++                    break
++            if not duplicate_found:
++                if entry.normalized_payload.get("duplicate") != "Yes":
++                    entry.normalized_payload["duplicate"] = "No"
++            seen_entries.append(entry)
++        return duplicates
++
++    def process(
++        self,
++        new_visit_df: pd.DataFrame,
++        reprint_df: pd.DataFrame,
++        new_visit_mapping: HeaderMappingResult,
++        reprint_mapping: HeaderMappingResult,
++        batch_label: Optional[str] = None,
++    ) -> ProcessingReport:
++        new_entries, new_issues = self.normalize_rows(new_visit_df, "new_visit", new_visit_mapping)
++        re_entries, re_issues = self.normalize_rows(reprint_df, "reprint", reprint_mapping)
++
++        combined = new_entries + re_entries
++        cross_duplicates = self.detect_duplicates(combined)
++        batch_duplicates = self.deduplicate_within_batch(combined)
++        duplicate_reports_raw = cross_duplicates + batch_duplicates
++
++        for entry in combined:
++            if entry.normalized_payload.get("duplicate") == "Yes" and entry.list_source != "Both Lists":
++                entry.list_source = entry.normalized_payload.get("list_source", entry.list_source)
++
++        summary = {
++            "new_visits": len(new_entries),
++            "reprints": len(re_entries),
++            "combined_total": len(combined),
++            "duplicates": sum(1 for entry in combined if entry.normalized_payload.get("duplicate") == "Yes"),
++        }
++
++        issues = {**new_issues}
++        for key, value in re_issues.items():
++            issues.setdefault(key, []).extend(value)
++
++        with session_scope() as conn:
++            cursor = conn.execute(
++                "INSERT INTO batches (label) VALUES (?)",
++                (batch_label,),
++            )
++            batch_id = cursor.lastrowid
++            entry_records: Dict[int, int] = {}
++            for entry in combined:
++                cursor = conn.execute(
++                    """
++                    INSERT INTO entries (
++                        batch_id,
++                        list_source,
++                        date_time_local,
++                        raw_payload_json,
++                        normalized_payload_json,
++                        validation_status,
++                        uncertainty_reasons
++                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
++                    """,
++                    (
++                        batch_id,
++                        entry.list_source,
++                        format_datetime(entry.date_time) if entry.date_time else None,
++                        json.dumps(entry.raw, default=str),
++                        json.dumps(entry.normalized_payload, default=str),
++                        entry.validation_status,
++                        json.dumps(entry.uncertainty_reasons),
++                    ),
++                )
++                entry_records[id(entry)] = cursor.lastrowid
++
++            for duplicate in duplicate_reports_raw:
++                entry_obj = duplicate["entry"]
++                entry_id = entry_records.get(id(entry_obj))
++                matched_id = duplicate.get("matched_entry_id")
++                if not matched_id:
++                    matched_entry = duplicate.get("matched")
++                    if matched_entry:
++                        matched_id = entry_records.get(id(matched_entry))
++                conn.execute(
++                    "INSERT INTO duplicate_matches (entry_id, matched_entry_id, rule, score) VALUES (?, ?, ?, ?)",
++                    (entry_id, matched_id, duplicate["rule"], duplicate.get("score")),
++                )
++
++        for entry in combined:
++            entry_id = entry_records.get(id(entry))
++            if entry_id:
++                self.existing_entries_cache.append({"entry": entry, "entry_id": entry_id})
++
++        return ProcessingReport(
++            normalized_entries=combined,
++            header_mapping=HeaderMappingResult(
++                mapping={**new_visit_mapping.mapping, **reprint_mapping.mapping},
++                missing=list(set(new_visit_mapping.missing + reprint_mapping.missing)),
++                extras=list(set(new_visit_mapping.extras + reprint_mapping.extras)),
++            ),
++            issues=issues,
++            duplicate_reports=[
++                {
++                    "rule": report["rule"],
++                    "score": report["score"],
++                    "entry_name": report["entry"].name,
++                    "matched_name": report["matched"].name,
++                }
++                for report in duplicate_reports_raw
++            ],
++            summary=summary,
++            batch_id=batch_id,
++        )
++
++    def export(self, entries: List[NormalizedEntry], batch_id: int) -> Tuple[Path, Path]:
++        settings = self.settings
++        entries_sorted = sorted(
++            entries,
++            key=lambda e: (
++                (e.name.split()[0].lower() if e.name else ""),
++                (e.name.split()[-1].lower() if e.name else ""),
++            ),
++        )
++
++        stamps_rows = [
++            {
++                "Name": entry.name,
++                "Address": entry.address,
++                "City": entry.city,
++                "State": entry.state,
++                "Zip": entry.zip_code,
++            }
++            for entry in entries_sorted
++        ]
++
++        combined_rows = [
++            {
++                "Name": entry.name,
++                "Clinic Name": entry.clinic_name,
++                "Address": entry.address,
++                "City": entry.city,
++                "State": entry.state,
++                "Zip Code": entry.zip_code,
++                "Heally Link": entry.heally_link,
++                "Date and Time": format_datetime(entry.date_time),
++                "List Source": entry.list_source,
++                "Duplicate?": entry.normalized_payload.get("duplicate", "No"),
++            }
++            for entry in entries_sorted
++        ]
++
++        stamps_path = settings.export_dir / f"stamps_batch_{batch_id}.csv"
++        combined_path = settings.export_dir / f"combined_batch_{batch_id}.csv"
++
++        pd.DataFrame(stamps_rows).to_csv(stamps_path, index=False)
++        pd.DataFrame(combined_rows).to_csv(combined_path, index=False)
++
++        with session_scope() as conn:
++            now = datetime.utcnow().isoformat()
++            conn.execute(
++                """
++                INSERT INTO print_jobs (
++                    batch_id,
++                    started_at,
++                    finished_at,
++                    entry_count,
++                    stamps_export_path,
++                    combined_export_path
++                ) VALUES (?, ?, ?, ?, ?, ?)
++                """,
++                (
++                    batch_id,
++                    now,
++                    now,
++                    len(entries_sorted),
++                    str(stamps_path),
++                    str(combined_path),
++                ),
++            )
++
++        return stamps_path, combined_path
++
++    def from_entry_record(self, entry_row: Dict[str, str]) -> NormalizedEntry:
++        payload = json.loads(entry_row["normalized_payload_json"])
++        raw_payload = json.loads(entry_row["raw_payload_json"])
++        date_value = entry_row.get("date_time_local")
++        date_time = datetime.fromisoformat(date_value) if date_value else None
++        normalized = NormalizedEntry(
++            name=payload.get("name", raw_payload.get("name", "")),
++            clinic_name=payload.get("clinic_name", ""),
++            address=payload.get("address", ""),
++            city=payload.get("city", ""),
++            state=payload.get("state", ""),
++            zip_code="-".join(filter(None, [payload.get("zip"), payload.get("zip4")]))
++            if payload.get("zip4")
++            else payload.get("zip", ""),
++            heally_link=payload.get("heally_link", "N/A"),
++            heally_id=payload.get("heally_id"),
++            date_time=date_time,
++            list_source=entry_row.get("list_source", ""),
++            raw=raw_payload,
++            normalized_payload=payload,
++            validation_status=entry_row.get("validation_status", "ok"),
++            uncertainty_reasons=json.loads(entry_row.get("uncertainty_reasons", "[]")),
++        )
++        return normalized
++
++
++__all__ = ["DataProcessor", "ProcessingReport"]
+diff --git a/cards/simple_pandas.py b/cards/simple_pandas.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..65f5b054d05c65c2bd451602c727a5f23cff412a
+--- /dev/null
++++ b/cards/simple_pandas.py
+@@ -0,0 +1,190 @@
++from __future__ import annotations
++
++import csv
++import io
++import json
++import zipfile
++from pathlib import Path
++from typing import Any, Dict, Iterable, Iterator, List, Optional
++from xml.etree import ElementTree as ET
++
++__all__ = [
++    "DataFrame",
++    "read_csv",
++    "read_excel",
++    "read_parquet",
++]
++
++
++class Row(dict):
++    def to_dict(self) -> Dict[str, Any]:
++        return dict(self)
++
++
++class _ILoc:
++    def __init__(self, df: "DataFrame") -> None:
++        self.df = df
++
++    def __getitem__(self, item):
++        if isinstance(item, slice):
++            rows = self.df._rows[item]
++            return DataFrame([row.copy() for row in rows], columns=self.df.columns)
++        if isinstance(item, list):
++            rows = [self.df._rows[i] for i in item]
++            return DataFrame([row.copy() for row in rows], columns=self.df.columns)
++        return self.df._rows[item]
++
++
++class DataFrame:
++    def __init__(self, data: Optional[Any] = None, columns: Optional[List[str]] = None):
++        self._rows: List[Dict[str, Any]] = []
++        if data is None:
++            self._columns = columns or []
++            return
++        if isinstance(data, list):
++            for row in data:
++                if not isinstance(row, dict):
++                    raise TypeError("Rows must be dictionaries")
++                self._rows.append(dict(row))
++            self._columns = list(columns or (list(data[0].keys()) if data else []))
++            if not self._columns and data:
++                self._columns = list(data[0].keys())
++        elif isinstance(data, dict):
++            keys = list(data.keys())
++            length = len(next(iter(data.values()))) if data else 0
++            for key, values in data.items():
++                if len(values) != length:
++                    raise ValueError("All columns must be the same length")
++            for idx in range(length):
++                self._rows.append({key: data[key][idx] for key in keys})
++            self._columns = columns or keys
++        else:
++            raise TypeError("Unsupported data type for DataFrame")
++
++    @property
++    def columns(self) -> List[str]:
++        if hasattr(self, "_columns") and self._columns:
++            return list(self._columns)
++        if self._rows:
++            self._columns = list(self._rows[0].keys())
++        else:
++            self._columns = []
++        return list(self._columns)
++
++    def iterrows(self) -> Iterator[tuple[int, Row]]:
++        for idx, row in enumerate(self._rows):
++            yield idx, Row(row)
++
++    def copy(self) -> "DataFrame":
++        return DataFrame([row.copy() for row in self._rows], columns=self.columns)
++
++    def to_csv(self, path: Path | str | io.IOBase, index: bool = False) -> None:
++        close = False
++        if isinstance(path, (str, Path)):
++            fh = open(path, "w", newline="", encoding="utf-8")
++            close = True
++        else:
++            fh = path
++        writer = csv.DictWriter(fh, fieldnames=self.columns)
++        writer.writeheader()
++        for row in self._rows:
++            writer.writerow({col: row.get(col, "") for col in self.columns})
++        if close:
++            fh.close()
++
++    def to_parquet(self, path: Path | str, index: bool = False) -> None:
++        data = {
++            "columns": self.columns,
++            "rows": [[row.get(col) for col in self.columns] for row in self._rows],
++        }
++        with open(path, "w", encoding="utf-8") as fp:
++            json.dump(data, fp)
++
++    @property
++    def iloc(self) -> _ILoc:
++        return _ILoc(self)
++
++    def __len__(self) -> int:
++        return len(self._rows)
++
++    def __getitem__(self, key: str) -> List[Any]:
++        return [row.get(key) for row in self._rows]
++
++    def append(self, row: Dict[str, Any]) -> None:
++        self._rows.append(dict(row))
++
++    def to_records(self) -> List[Dict[str, Any]]:
++        return [row.copy() for row in self._rows]
++
++    def __iter__(self):
++        return iter(self._rows)
++
++
++def _ensure_text(data: bytes | str) -> str:
++    if isinstance(data, bytes):
++        return data.decode("utf-8")
++    return data
++
++
++def read_csv(source, sep: str = ",") -> DataFrame:
++    if hasattr(source, "read"):
++        content = _ensure_text(source.read())
++        stream = io.StringIO(content)
++    else:
++        stream = open(source, "r", encoding="utf-8")
++    reader = csv.DictReader(stream, delimiter=sep)
++    rows = [dict(row) for row in reader]
++    df = DataFrame(rows)
++    if not hasattr(source, "read"):
++        stream.close()
++    return df
++
++
++def read_parquet(path) -> DataFrame:
++    with open(path, "r", encoding="utf-8") as fp:
++        data = json.load(fp)
++    columns = data.get("columns", [])
++    rows = [dict(zip(columns, values)) for values in data.get("rows", [])]
++    return DataFrame(rows, columns=columns)
++
++
++def read_excel(path) -> DataFrame:
++    if hasattr(path, "read"):
++        data = path.read()
++        stream = io.BytesIO(data)
++    else:
++        stream = open(path, "rb")
++    with zipfile.ZipFile(stream) as zf:
++        shared_strings: List[str] = []
++        if "xl/sharedStrings.xml" in zf.namelist():
++            ss_root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
++            ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
++            for si in ss_root.findall("a:si", ns):
++                texts = [node.text or "" for node in si.findall("a:t", ns)]
++                text = "".join(texts) if texts else "".join(si.itertext())
++                shared_strings.append(text)
++        sheet_root = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
++        ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
++        rows = []
++        headers: List[str] = []
++        for idx, row in enumerate(sheet_root.findall(".//a:row", ns)):
++            values: List[str] = []
++            for cell in row.findall("a:c", ns):
++                value = ""
++                v_node = cell.find("a:v", ns)
++                if v_node is not None:
++                    value = v_node.text or ""
++                if cell.get("t") == "s" and value:
++                    value = shared_strings[int(value)]
++                values.append(value)
++            if idx == 0:
++                headers = values
++            else:
++                rows.append(dict(zip(headers, values)))
++    if not hasattr(path, "read"):
++        stream.close()
++    return DataFrame(rows, columns=headers)
++
++
++def DataFrame_from_records(records: Iterable[Dict[str, Any]]) -> DataFrame:  # pragma: no cover
++    return DataFrame(list(records))
+diff --git a/cards/streamlit_app.py b/cards/streamlit_app.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..15a45ef5cbe1a48039927b357003b30f5f852136
+--- /dev/null
++++ b/cards/streamlit_app.py
+@@ -0,0 +1,129 @@
++from __future__ import annotations
++
++import io
++from typing import Dict
++
++from . import simple_pandas as pd
++import streamlit as st
++
++from . import init_db
++from .header_mapping import HeaderMappingResult, map_headers
++from .processing import DataProcessor
++
++
++def load_dataframe(uploaded_file) -> pd.DataFrame:
++    if uploaded_file is None:
++        return pd.DataFrame()
++    content = uploaded_file.read()
++    buffer = io.BytesIO(content)
++    if uploaded_file.name.endswith(".xlsx"):
++        return pd.read_excel(buffer)
++    try:
++        return pd.read_csv(io.BytesIO(content))
++    except Exception:
++        buffer.seek(0)
++        return pd.read_csv(io.BytesIO(content), sep="\t")
++
++
++def header_wizard(df: pd.DataFrame, list_type: str) -> HeaderMappingResult:
++    suggestions = map_headers(df.columns, list_type)
++    mapping: Dict[str, str] = {}
++    st.markdown("### Header Mapping")
++    for canonical in suggestions.mapping.keys():
++        default = suggestions.mapping[canonical]
++        mapping[canonical] = st.selectbox(
++            f"Map {canonical}",
++            options=list(df.columns),
++            index=list(df.columns).index(default) if default in df.columns else 0,
++            key=f"{list_type}_{canonical}",
++        )
++    missing = [field for field in suggestions.missing if field not in mapping]
++    return HeaderMappingResult(mapping=mapping, missing=missing, extras=[])
++
++
++def render():
++    st.set_page_config(page_title="Card Printing Table", layout="wide")
++    st.title("Card Printing Table")
++
++    init_db()
++    processor = DataProcessor()
++
++    if "phase" not in st.session_state:
++        st.session_state.phase = "new"
++    if "new_df" not in st.session_state:
++        st.session_state.new_df = None
++    if "re_df" not in st.session_state:
++        st.session_state.re_df = None
++    if "report" not in st.session_state:
++        st.session_state.report = None
++
++    if st.session_state.phase == "new":
++        st.header("Phase A: Upload New Visits")
++        new_file = st.file_uploader("Upload New Visits", type=["csv", "xlsx", "tsv"], key="new_upload")
++        if new_file:
++            st.session_state.new_df = load_dataframe(new_file)
++            st.success("List 1 (New Visits) received. Ready for List 2 (Reprints)?")
++            st.session_state.phase = "reprint"
++        st.stop()
++
++    if st.session_state.phase == "reprint":
++        st.header("Phase B: Upload Reprints")
++        re_file = st.file_uploader("Upload Reprints", type=["csv", "xlsx", "tsv"], key="reprint_upload")
++        if re_file:
++            st.session_state.re_df = load_dataframe(re_file)
++            st.success("List 2 (Reprints) received. Would you like me to process and merge both lists now?")
++            if st.button("Process Lists"):
++                st.session_state.phase = "process"
++        st.stop()
++
++    if st.session_state.phase == "process":
++        new_df: pd.DataFrame = st.session_state.new_df
++        re_df: pd.DataFrame = st.session_state.re_df
++        st.subheader("Header Mapping - New Visits")
++        new_mapping = header_wizard(new_df, "new_visit")
++        st.subheader("Header Mapping - Reprints")
++        re_mapping = header_wizard(re_df, "reprint")
++        if st.button("Run Merge"):
++            report = processor.process(new_df, re_df, new_mapping, re_mapping)
++            st.session_state.report = report
++            st.session_state.phase = "review"
++        st.stop()
++
++    if st.session_state.phase == "review":
++        report = st.session_state.report
++        st.header("Review")
++        st.write("Summary", report.summary)
++        attention = sum(1 for entry in report.normalized_entries if entry.validation_status == "attention")
++        normalized = sum(1 for entry in report.normalized_entries if entry.validation_status == "ok")
++        st.info(f"{normalized} rows were normalized; {attention} rows require attention.")
++        st.write("Issues", report.issues)
++        st.write("Duplicates", report.duplicate_reports)
++
++        st.subheader("Combined Master Preview")
++        combined_df = pd.DataFrame(
++            [
++                {
++                    "Name": entry.name,
++                    "Clinic Name": entry.clinic_name,
++                    "Address": entry.address,
++                    "City": entry.city,
++                    "State": entry.state,
++                    "Zip Code": entry.zip_code,
++                    "Heally Link": entry.heally_link,
++                    "Date and Time": entry.date_time,
++                    "List Source": entry.list_source,
++                    "Duplicate?": entry.normalized_payload.get("duplicate", "No"),
++                }
++                for entry in report.normalized_entries
++            ]
++        )
++        st.dataframe(combined_df)
++
++        st.info("Would you like me to export this as a CSV or make any modifications?")
++        if st.button("Export CSVs"):
++            processor.export(report.normalized_entries, report.batch_id)
++            st.success("Exports created. You can download them from the exports directory.")
++
++
++if __name__ == "__main__":
++    render()
+diff --git a/cards/utils.py b/cards/utils.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..52b9357e67d0da421415d385dd466cf5231111fc
+--- /dev/null
++++ b/cards/utils.py
+@@ -0,0 +1,165 @@
++from __future__ import annotations
++
++import json
++import re
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Dict, Iterable, List, Optional, Tuple
++
++from difflib import SequenceMatcher
++from zoneinfo import ZoneInfo
++
++@dataclass
++class NormalizedEntry:
++    name: str
++    clinic_name: str
++    address: str
++    city: str
++    state: str
++    zip_code: str
++    heally_link: str
++    heally_id: Optional[str]
++    date_time: Optional[datetime]
++    list_source: str
++    raw: Dict
++    normalized_payload: Dict
++    validation_status: str
++    uncertainty_reasons: List[str]
++
++
++NAME_COMMA_RE = re.compile(r"^(?P<last>[^,]+),\s*(?P<first>[^,]+)(?:,?\s*(?P<middle>.+))?$")
++HEALLY_ID_RE = re.compile(r"(\d{6,})")
++
++
++USPS_STATE_RE = re.compile(r"^[A-Z]{2}$")
++
++DATETIME_FORMATS = [
++    "%Y-%m-%d %H:%M:%S",
++    "%Y-%m-%d %H:%M",
++    "%Y-%m-%d",
++    "%m/%d/%Y %H:%M:%S",
++    "%m/%d/%Y %H:%M",
++    "%m/%d/%Y",
++    "%Y/%m/%d %H:%M:%S",
++    "%Y/%m/%d %H:%M",
++    "%Y/%m/%d",
++    "%m-%d-%Y %H:%M:%S",
++    "%m-%d-%Y %H:%M",
++    "%m-%d-%Y",
++]
++
++
++def normalize_name(name: str) -> Tuple[str, List[str]]:
++    name = name.strip()
++    reasons: List[str] = []
++    if not name:
++        return "", ["missing_name"]
++    match = NAME_COMMA_RE.match(name)
++    if match:
++        first = match.group("first").title()
++        last = match.group("last").title()
++        middle = match.group("middle")
++        parts = [first]
++        if middle:
++            parts.append(" ".join(token.title() for token in middle.split()))
++        parts.append(last)
++        normalized = " ".join(parts)
++        reasons.append("name_flipped")
++        return normalized, reasons
++    parts = [token.title() for token in name.split()]
++    return " ".join(parts), reasons
++
++
++def extract_heally(link: Optional[str], raw: Dict) -> Tuple[str, Optional[str], List[str]]:
++    reasons = []
++    if link and link.strip():
++        link = link.strip()
++        match = HEALLY_ID_RE.search(link)
++        heally_id = match.group(1) if match else None
++        return link, heally_id, reasons
++    # search in raw values
++    search_space = " ".join(str(value) for value in raw.values() if isinstance(value, str))
++    match = HEALLY_ID_RE.search(search_space)
++    if match:
++        heally_id = match.group(1)
++        link = f"https://getheally.com/super_admin/patient_users/{heally_id}"
++        reasons.append("constructed_heally_link")
++        return link, heally_id, reasons
++    return "N/A", None, ["missing_heally_link"]
++
++
++def parse_datetime(value: Optional[str], timezone: str) -> Tuple[Optional[datetime], List[str]]:
++    if not value:
++        return None, ["missing_datetime"]
++    parsed = None
++    for fmt in DATETIME_FORMATS:
++        try:
++            parsed = datetime.strptime(value.strip(), fmt)
++            break
++        except (ValueError, TypeError, AttributeError):
++            continue
++    if parsed is None:
++        return None, ["invalid_datetime"]
++    try:
++        tz = ZoneInfo(timezone)
++        parsed = parsed.replace(tzinfo=tz)
++        parsed = parsed.astimezone(tz)
++        return parsed.replace(tzinfo=None), []
++    except Exception:
++        return parsed, ["timezone_error"]
++
++
++def format_datetime(dt: Optional[datetime]) -> str:
++    if not dt:
++        return ""
++    return dt.strftime("%Y-%m-%d %H:%M:%S")
++
++
++def normalized_key(entry: NormalizedEntry) -> Tuple[str, str, str, str, str]:
++    return (
++        entry.name.lower(),
++        entry.address.lower(),
++        entry.city.lower(),
++        entry.state.lower(),
++        entry.zip_code,
++    )
++
++
++def _ratio(left: str, right: str) -> float:
++    if not left and not right:
++        return 1.0
++    return SequenceMatcher(None, left.lower(), right.lower()).ratio()
++
++
++def fuzzy_match_score(a: NormalizedEntry, b: NormalizedEntry) -> float:
++    name_score = _ratio(a.name, b.name)
++    address_score = _ratio(a.address, b.address)
++    return (name_score + address_score) / 2
++
++
++def serialize_entry(entry: NormalizedEntry) -> Dict:
++    payload = {
++        "Name": entry.name,
++        "Clinic Name": entry.clinic_name,
++        "Address": entry.address,
++        "City": entry.city,
++        "State": entry.state,
++        "Zip Code": entry.zip_code,
++        "Heally Link": entry.heally_link,
++        "Date and Time": format_datetime(entry.date_time),
++        "List Source": entry.list_source,
++        "Duplicate?": entry.normalized_payload.get("duplicate", "No"),
++    }
++    return payload
++
++
++__all__ = [
++    "NormalizedEntry",
++    "normalize_name",
++    "extract_heally",
++    "parse_datetime",
++    "format_datetime",
++    "normalized_key",
++    "fuzzy_match_score",
++    "serialize_entry",
++]
+diff --git a/docker-compose.yml b/docker-compose.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..f08effe60a46644ec4dd5a69fa8e27fa049e0b75
+--- /dev/null
++++ b/docker-compose.yml
+@@ -0,0 +1,30 @@
++version: "3.9"
++
++services:
++  api:
++    build: .
++    command: uvicorn cards.api:app --host 0.0.0.0 --port 8000
++    environment:
++      - CARDS_DB_URL=sqlite:///./data/card_printing.db
++      - CARDS_EXPORT_DIR=/app/exports
++      - CARDS_TIMEZONE=America/Los_Angeles
++    volumes:
++      - ./exports:/app/exports
++      - ./data:/app/data
++    ports:
++      - "8000:8000"
++
++  streamlit:
++    build: .
++    command: streamlit run cards/streamlit_app.py --server.address=0.0.0.0 --server.port=8501
++    environment:
++      - CARDS_DB_URL=sqlite:///./data/card_printing.db
++      - CARDS_EXPORT_DIR=/app/exports
++      - CARDS_TIMEZONE=America/Los_Angeles
++    depends_on:
++      - api
++    volumes:
++      - ./exports:/app/exports
++      - ./data:/app/data
++    ports:
++      - "8501:8501"
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..e85789538527f73417e4012e3437a1b5666e8d05
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,45 @@
++[build-system]
++requires = ["setuptools>=61", "wheel"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "card-printing-table"
++version = "0.1.0"
++description = "Card Printing Table application"
++authors = [{ name = "Auto Generated" }]
++readme = "README.md"
++requires-python = ">=3.11"
++dependencies = [
++    "fastapi",
++    "uvicorn[standard]",
++    "pydantic",
++    "sqlalchemy",
++    "pandas",
++    "python-dateutil",
++    "pytz",
++    "typer[all]",
++    "streamlit",
++    "openpyxl",
++    "rapidfuzz",
++    "python-dotenv",
++]
++
++[project.optional-dependencies]
++dev = [
++    "pytest",
++    "pytest-cov",
++    "mypy",
++    "ruff",
++]
++
++[project.scripts]
++cards = "cards.cli:app"
++
++[tool.pytest.ini_options]
++addopts = "-q"
++
++[tool.ruff]
++line-length = 100
++
++[tool.mypy]
++ignore_missing_imports = true
+diff --git a/samples/new_visits.csv b/samples/new_visits.csv
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa590160084dc4c764a671a553d1d9974adbb189
+--- /dev/null
++++ b/samples/new_visits.csv
+@@ -0,0 +1,3 @@
++Patient Name,Clinic,Street Addr,City,State Name,Zip Code,Appointment Time,Notes
++"Lijiao Liu",HappyMD,28 Davison Hill Ln,Oroville,CA,95966,2/20/2025 11:13,ID: 1481480
++"Christina Beatrice Diaz",HappyMD,1711 245th street,Lomita,California,90717,02-07-2025 16:07,
+diff --git a/scripts/generate_sample_reprints_xlsx.py b/scripts/generate_sample_reprints_xlsx.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa7c5f434de3f160a0686847760880f75803ca8e
+--- /dev/null
++++ b/scripts/generate_sample_reprints_xlsx.py
+@@ -0,0 +1,53 @@
++"""Generate the sample Reprints XLSX file for Card Printing Table."""
++from __future__ import annotations
++
++from pathlib import Path
++
++from openpyxl import Workbook
++
++
++DATA_ROWS = [
++    {
++        "Full Name": "PARKER, OLIVIA",
++        "Clinic": "420Recs",
++        "Street": "3656 Summerset Pl",
++        "Town": "Inglewood",
++        "State": "California",
++        "Postal": "90305-1420",
++        "Patient ID": 1481480,
++        "Recorded": "02/19/2025 10:22 AM",
++    },
++    {
++        "Full Name": "Smith, Andrew",
++        "Clinic": "HappyMD",
++        "Street": "1711 245th St",
++        "Town": "Lomita",
++        "State": "CA",
++        "Postal": "90717",
++        "Heally URL": "https://getheally.com/super_admin/patient_users/1406723",
++        "Recorded": "2-7-25 4:07 pm",
++    },
++]
++
++
++def build_workbook() -> Workbook:
++    wb = Workbook()
++    ws = wb.active
++    ws.title = "Reprints"
++    headers = list(DATA_ROWS[0].keys())
++    ws.append(headers)
++    for row in DATA_ROWS:
++        ws.append([row.get(header, "") for header in headers])
++    return wb
++
++
++def main() -> None:
++    target_path = Path(__file__).resolve().parent.parent / "samples" / "reprints.xlsx"
++    target_path.parent.mkdir(parents=True, exist_ok=True)
++    wb = build_workbook()
++    wb.save(target_path)
++    print(f"Generated {target_path.relative_to(Path.cwd())}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c9ccf8bcb3ba8f750c77cc0dd2426fc24af64f0
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,32 @@
++import os
++import sys
++from pathlib import Path
++
++import pytest
++
++ROOT = Path(__file__).resolve().parent.parent
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++from cards import init_db
++from cards.config import get_settings
++from cards import db as db_module
++
++
++@pytest.fixture(autouse=True)
++def configure_env(tmp_path, monkeypatch):
++    db_path = tmp_path / "test.db"
++    export_path = tmp_path / "exports"
++    monkeypatch.setenv("CARDS_DB_URL", f"sqlite:///{db_path}")
++    monkeypatch.setenv("CARDS_EXPORT_DIR", str(export_path))
++    try:
++        get_settings.cache_clear()
++    except AttributeError:
++        pass
++    init_db()
++    yield
++    try:
++        get_settings.cache_clear()
++    except AttributeError:
++        pass
++    db_module._connection_cache.clear()
+diff --git a/tests/test_address.py b/tests/test_address.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe4f859a9ca495e1bb40121a8250744447635b90
+--- /dev/null
++++ b/tests/test_address.py
+@@ -0,0 +1,28 @@
++from cards.address import normalize_address, normalize_state, normalize_zip, validate_and_normalize_address
++
++
++def test_address_abbreviation_expansion():
++    result = validate_and_normalize_address("123 main st", "los angeles", "ca", "90001")
++    assert result.address == "123 Main Street"
++    assert result.city == "Los Angeles"
++    assert result.state == "CA"
++
++
++def test_state_name_conversion():
++    state, reasons = normalize_state("California")
++    assert state == "CA"
++    assert "state_name_converted" in reasons
++
++
++def test_zip_parsing_with_plus4():
++    zip5, zip4, reasons = normalize_zip("94107-1234")
++    assert zip5 == "94107"
++    assert zip4 == "1234"
++    assert reasons == tuple()
++
++
++def test_infer_city_state_from_zip_missing_city():
++    result = validate_and_normalize_address("1711 245th st", "", "", "90717")
++    assert result.city == "Lomita"
++    assert result.state == "CA"
++    assert "inferred_city_state_from_zip" in result.reasons
+diff --git a/tests/test_header_mapping.py b/tests/test_header_mapping.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1adf79a464f1fa6a66d1e8d05293b111a26b062
+--- /dev/null
++++ b/tests/test_header_mapping.py
+@@ -0,0 +1,27 @@
++from cards.header_mapping import HeaderMapper, map_headers
++
++
++def test_header_mapping_auto_detection():
++    headers = [
++        "patient_full_name",
++        "clinic",
++        "address1",
++        "city_name",
++        "State",
++        "zip_code",
++        "Appointment",
++        "profile_url",
++    ]
++    result = map_headers(headers, "new_visit")
++    assert result.mapping["name"] == "patient_full_name"
++    assert result.mapping["clinic_name"] == "clinic"
++    assert result.mapping["address"] == "address1"
++    assert result.mapping["date_time"] == "Appointment"
++    assert "zip" in result.mapping
++
++
++def test_header_mapper_missing_required():
++    headers = ["name", "address"]
++    result = map_headers(headers, "reprint")
++    assert "clinic_name" in result.missing
++    assert "date_time" in result.missing
+diff --git a/tests/test_processing.py b/tests/test_processing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8419a9ed20c675129d4626ba292bf336cd469773
+--- /dev/null
++++ b/tests/test_processing.py
+@@ -0,0 +1,124 @@
++from cards import simple_pandas as pd
++
++from cards.config import get_settings
++from cards.processing import DataProcessor
++from cards.header_mapping import HeaderMappingResult
++
++
++def build_dataframe(rows):
++    return pd.DataFrame(rows)
++
++
++def get_mappings(df):
++    return HeaderMappingResult(
++        mapping={
++            "name": "name",
++            "clinic_name": "clinic",
++            "address": "address",
++            "city": "city",
++            "state": "state",
++            "zip": "zip",
++            "date_time": "datetime",
++            "heally_link": "heally",
++        },
++        missing=[],
++        extras=[],
++    )
++
++
++def test_process_and_duplicate_detection(tmp_path):
++    processor = DataProcessor()
++    new_df = build_dataframe(
++        [
++            {
++                "name": "John Doe",
++                "clinic": "HappyMD",
++                "address": "28 Davison Hill Ln",
++                "city": "Oroville",
++                "state": "California",
++                "zip": "95966",
++                "datetime": "2025-02-20 11:13",
++                "heally": "",
++            }
++        ]
++    )
++    re_df = build_dataframe(
++        [
++            {
++                "name": "Jon Doe",
++                "clinic": "HappyMD",
++                "address": "28 Davison Hill Lane",
++                "city": "Oroville",
++                "state": "CA",
++                "zip": "95966",
++                "datetime": "2025/02/20 11:13",
++                "heally": "https://getheally.com/super_admin/patient_users/1481480",
++            }
++        ]
++    )
++
++    report = processor.process(new_df, re_df, get_mappings(new_df), get_mappings(re_df))
++
++    assert report.summary["combined_total"] == 2
++    assert any("fuzzy" in d["rule"] for d in report.duplicate_reports)
++    assert report.batch_id > 0
++
++
++def test_export_sorting(tmp_path):
++    settings = get_settings()
++    settings.export_dir = tmp_path
++    processor = DataProcessor()
++
++    df = build_dataframe(
++        [
++            {
++                "name": "Smith, John",
++                "clinic": "HappyMD",
++                "address": "1711 245th Street",
++                "city": "Lomita",
++                "state": "CA",
++                "zip": "90717",
++                "datetime": "2025-02-07 16:07",
++                "heally": "",
++            },
++            {
++                "name": "Christina Beatrice Diaz",
++                "clinic": "HappyMD",
++                "address": "1711 245th Street",
++                "city": "Lomita",
++                "state": "CA",
++                "zip": "90717",
++                "datetime": "2025-02-07 16:07",
++                "heally": "",
++            },
++        ]
++    )
++
++    report = processor.process(df.iloc[:1], df.iloc[1:], get_mappings(df), get_mappings(df))
++    stamps, combined = processor.export(report.normalized_entries, report.batch_id)
++
++    stamps_df = pd.read_csv(stamps)
++    assert list(stamps_df.columns) == ["Name", "Address", "City", "State", "Zip"]
++    assert list(stamps_df["Name"]) == sorted(stamps_df["Name"], key=lambda n: n.split()[0].lower())
++
++
++def test_heally_link_construction():
++    processor = DataProcessor()
++    df = build_dataframe(
++        [
++            {
++                "name": "Jane Example 1234567",
++                "clinic": "Clinic",
++                "address": "123 Main St",
++                "city": "Los Angeles",
++                "state": "CA",
++                "zip": "90001",
++                "datetime": "2025-01-01",
++                "heally": "",
++            }
++        ]
++    )
++    report = processor.process(df, df, get_mappings(df), get_mappings(df))
++    entry = report.normalized_entries[0]
++    assert entry.heally_link.endswith("1234567")
++    assert "constructed_heally_link" in entry.uncertainty_reasons
